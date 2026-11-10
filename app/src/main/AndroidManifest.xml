@@ -5,6 +5,8 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <application
         android:label="MojTV"
+        android:icon="@drawable/ic_launcher"
+        android:banner="@drawable/ic_launcher"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
