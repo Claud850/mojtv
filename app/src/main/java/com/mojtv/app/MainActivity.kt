@@ -49,6 +49,8 @@ class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var osd: TextView
+    private lateinit var osdBox: LinearLayout
+    private lateinit var osdLogo: ImageView
     private lateinit var status: TextView
     private lateinit var controls: LinearLayout
     private lateinit var btnPlay: TextView
@@ -88,7 +90,7 @@ class MainActivity : Activity() {
     private val adapter = ChAdapter()
     private val prefs by lazy { getSharedPreferences("p", MODE_PRIVATE) }
 
-    private val hideOsd = Runnable { osd.visibility = View.GONE }
+    private val hideOsd = Runnable { osdBox.visibility = View.GONE }
     private val hideControls = Runnable { controls.visibility = View.GONE }
     private val retry = Runnable { if (current >= 0) play(current) }
     private val beat = object : Runnable {
@@ -126,7 +128,7 @@ class MainActivity : Activity() {
                 btnPlay.text = if (isPlaying) "⏸" else "▶"
             }
             override fun onVideoSizeChanged(v: VideoSize) {
-                if (osd.visibility == View.VISIBLE) updateOsd()
+                if (osdBox.visibility == View.VISIBLE) updateOsd()
             }
             override fun onPlayerError(e: PlaybackException) {
                 if (blocked) return
@@ -207,11 +209,15 @@ class MainActivity : Activity() {
         val tap = View(this).apply { setOnClickListener { onTap() } }
         root.addView(tap, FrameLayout.LayoutParams(mp, mp))
 
-        osd = TextView(this).apply {
-            textSize = 22f; setTextColor(Color.WHITE); setBackgroundColor(0x99000000.toInt())
-            setPadding(dp(16), dp(10), dp(16), dp(10)); visibility = View.GONE
+        osdBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.END
+            setBackgroundColor(0x99000000.toInt()); setPadding(dp(16), dp(10), dp(16), dp(10)); visibility = View.GONE
         }
-        root.addView(osd, FrameLayout.LayoutParams(wc, wc).apply {
+        osdLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_END; visibility = View.GONE }
+        osd = TextView(this).apply { textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.END }
+        osdBox.addView(osdLogo, LinearLayout.LayoutParams(dp(150), dp(70)))
+        osdBox.addView(osd, LinearLayout.LayoutParams(wc, wc))
+        root.addView(osdBox, FrameLayout.LayoutParams(wc, wc).apply {
             gravity = Gravity.TOP or Gravity.END; setMargins(0, dp(24), dp(24), 0)
         })
 
@@ -290,28 +296,39 @@ class MainActivity : Activity() {
 
     private fun updateOsd() {
         val c = all.getOrNull(current) ?: return
-        val v = player.videoSize
-        val res = if (v.width > 0) " • " + v.width + "x" + v.height else ""
         val sb = StringBuilder()
-        sb.append(c.no).append("  ").append(c.name)
-        if (favs.contains(c.url)) sb.append("  ★")
+        if (c.logo.isNotEmpty()) {
+            osdLogo.visibility = View.VISIBLE
+            osdLogo.load(c.logo) {
+                listener(onError = { _, _ ->
+                    osdLogo.visibility = View.GONE
+                    osd.text = if (osd.text.isEmpty()) c.name else c.name + "\n" + osd.text
+                    osd.visibility = View.VISIBLE
+                })
+            }
+        } else {
+            osdLogo.visibility = View.GONE
+            sb.append(c.name)
+        }
         val now = Epg.now(c.tvgId)
         if (now != null) {
-            sb.append("\n").append(fmt(now.start)).append("  ").append(now.title)
+            if (sb.isNotEmpty()) sb.append("\n")
+            sb.append(fmt(now.start)).append("  ").append(now.title)
             val nx = Epg.next(c.tvgId)
             if (nx != null) sb.append("\n› ").append(fmt(nx.start)).append("  ").append(nx.title)
         }
-        sb.append("\n").append(c.group).append(res)
         osd.text = sb.toString()
+        osd.visibility = if (sb.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun showOsd() {
-        updateOsd(); osd.visibility = View.VISIBLE
+        updateOsd(); osdBox.visibility = View.VISIBLE
         h.removeCallbacks(hideOsd); h.postDelayed(hideOsd, 5000)
     }
 
     private fun flash(msg: String) {
-        osd.text = msg; osd.visibility = View.VISIBLE
+        osdLogo.visibility = View.GONE
+        osd.text = msg; osd.visibility = View.VISIBLE; osdBox.visibility = View.VISIBLE
         h.removeCallbacks(hideOsd); h.postDelayed(hideOsd, 2500)
     }
 
@@ -469,7 +486,7 @@ class MainActivity : Activity() {
     private fun onChannels(p: Parsed) {
         all = p.channels.mapIndexed { i, c -> c.copy(no = i + 1) }
         if (all.isEmpty()) { shown = listOf(); adapter.notifyDataSetChanged(); setStatus("Playlista je prazna."); return }
-        groups = all.map { it.group }.distinct().sorted()
+        groups = all.map { it.group }.distinct()
         val items = ArrayList<String>()
         items.add("Sve grupe")
         items.add("★ Favoriti")
@@ -492,7 +509,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 Epg.load(url, ids)
-                ui { adapter.notifyDataSetChanged(); if (osd.visibility == View.VISIBLE) updateOsd() }
+                ui { adapter.notifyDataSetChanged(); if (osdBox.visibility == View.VISIBLE) updateOsd() }
             } catch (e: Throwable) {
             }
         }.start()
@@ -518,7 +535,7 @@ class MainActivity : Activity() {
         prefs.edit().putStringSet("fav", HashSet<String>(favs)).apply()
         applyFilter()
         updateFavBtn()
-        if (osd.visibility == View.VISIBLE) updateOsd()
+        if (osdBox.visibility == View.VISIBLE) updateOsd()
     }
 
     private fun updateFavBtn() {

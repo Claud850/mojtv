@@ -11,6 +11,7 @@ object M3U {
     private val reGroup = Regex("group-title=\"([^\"]*)\"")
     private val reLogo = Regex("tvg-logo=\"([^\"]*)\"")
     private val reId = Regex("tvg-id=\"([^\"]*)\"")
+    private val reSep = Regex("^[#*=~_\\-]{3,}")
     private val reEpg = Regex("(?:x-tvg-url|url-tvg)=\"([^\"]*)\"")
 
     private fun f(re: Regex, s: String): String = re.find(s)?.groupValues?.get(1) ?: ""
@@ -22,6 +23,7 @@ object M3U {
         var group = ""
         var logo = ""
         var id = ""
+        var section = ""
         for (raw in text.lineSequence()) {
             val l = raw.trim()
             if (l.isEmpty()) continue
@@ -35,7 +37,13 @@ object M3U {
             } else if (l.startsWith("#EXTGRP:")) {
                 group = l.substring(8).trim()
             } else if (!l.startsWith("#")) {
-                out.add(Channel(0, name.ifEmpty { l }, group.ifEmpty { "Ostalo" }, l, logo, id))
+                if (reSep.containsMatchIn(name)) {
+                    // "##### SLOVENIJA #####" nije kanal nego naslov odjeljka -> postaje grupa
+                    val sec = name.trim('#', '*', '=', '~', '_', '-', ' ', '\t')
+                    if (sec.isNotEmpty()) section = sec
+                } else {
+                    out.add(Channel(0, name.ifEmpty { l }, group.ifEmpty { section.ifEmpty { "Ostalo" } }, l, logo, id))
+                }
                 name = ""; group = ""; logo = ""; id = ""
             }
         }
