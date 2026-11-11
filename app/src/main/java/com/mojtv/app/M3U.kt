@@ -2,7 +2,8 @@ package com.mojtv.app
 
 data class Channel(
     val no: Int, val name: String, val group: String,
-    val url: String, val logo: String, val tvgId: String
+    val url: String, val logo: String, val tvgId: String,
+    val alts: List<String> = emptyList()
 )
 
 class Parsed(val channels: List<Channel>, val epg: String)

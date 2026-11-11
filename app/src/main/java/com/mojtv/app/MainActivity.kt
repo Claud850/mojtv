@@ -36,12 +36,14 @@ import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.load
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Date
 import java.util.Locale
 
@@ -67,7 +69,7 @@ class MainActivity : Activity() {
     private var plists = listOf<PlRef>()
     private var plIdx = 0
     private var loadedIdx = -1
-    private val cache = HashMap<Int, Parsed>()
+    private val cache = ConcurrentHashMap<Int, Parsed>()
     private var all = listOf<Channel>()
     private var shown = listOf<Channel>()
     private var groups = listOf<String>()
@@ -84,6 +86,17 @@ class MainActivity : Activity() {
     private var unlocked = false
     private var blocked = false
     private var errorState = false
+    private var mergeMode = true
+    private var rulesVer = ""
+    private var serverCat = ""
+    private var reloading = false
+    private var rawLists = listOf<List<Channel>>()
+    private var epgFromList = ""
+    private var hiddenGroups = setOf<String>()
+    private var hiddenCh = setOf<String>()
+    private var order = listOf<String>()
+    private var alias = mapOf<String, String>()
+    private var srcIdx = 0
 
     private val h = Handler(Looper.getMainLooper())
     private val tf = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -97,7 +110,7 @@ class MainActivity : Activity() {
         override fun run() {
             Thread {
                 try {
-                    val r = get(initUrl())
+                    val r = get(beatUrl())
                     ui { onBeat(r.first, r.second) }
                 } catch (e: Exception) {
                 }
@@ -132,8 +145,16 @@ class MainActivity : Activity() {
             }
             override fun onPlayerError(e: PlaybackException) {
                 if (blocked) return
-                val url = all.getOrNull(current)?.url ?: return
+                val ch = all.getOrNull(current) ?: return
+                val urls = listOf(ch.url) + ch.alts
+                val url = urls[srcIdx.coerceIn(0, urls.size - 1)]
                 if (!triedHls) { triedHls = true; startUrl(url, true); return }
+                if (srcIdx < urls.size - 1) {
+                    srcIdx++; triedHls = false
+                    setStatus("Rezervni izvor " + (srcIdx + 1) + "…")
+                    startUrl(urls[srcIdx], false)
+                    return
+                }
                 setStatus("Nema signala – ponovni pokušaj…")
                 h.removeCallbacks(retry); h.postDelayed(retry, 6000)
             }
@@ -395,6 +416,8 @@ class MainActivity : Activity() {
     private fun deviceId(): String =
         Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
 
+    private fun beatUrl(): String = initUrl().replace("a=init", "a=beat")
+
     private fun initUrl(): String {
         val nm = Build.MANUFACTURER + " " + Build.MODEL
         return Config.SERVER_URL + "api.php?a=init&device=" + enc(deviceId()) + "&name=" + enc(nm)
@@ -428,7 +451,7 @@ class MainActivity : Activity() {
                 }
                 if (r.first != 200) throw IOException("HTTP " + r.first)
                 val j = JSONObject(r.second)
-                ui { blocked = false; applySettings(j); setupPlaylists(j) }
+                ui { blocked = false; applySettings(j); applyRules(j); setupPlaylists(j) }
             } catch (e: Exception) {
                 ui { errorState = true; setStatus("Greška: " + e.message + "\nDodirni za ponovni pokušaj") }
             }
@@ -445,9 +468,59 @@ class MainActivity : Activity() {
             }
         } else if (code == 200) {
             if (blocked) { blocked = false; load(); return }
-            try { applySettings(JSONObject(body)) } catch (e: Exception) {}
+            try {
+                val j = JSONObject(body)
+                applySettings(j)
+                val ver = j.optString("ver")
+                if (ver.isNotEmpty() && ver != rulesVer && !reloading) refreshRules()
+            } catch (e: Exception) {}
             adapter.notifyDataSetChanged()
         }
+    }
+
+    private fun strList(a: JSONArray?): List<String> {
+        val l = ArrayList<String>()
+        if (a != null) for (k in 0 until a.length()) l.add(a.getString(k))
+        return l
+    }
+
+    private fun applyRules(j: JSONObject) {
+        mergeMode = j.optBoolean("merge", true)
+        rulesVer = j.optString("ver")
+        serverCat = j.optString("cat")
+        val r = j.optJSONObject("rules") ?: return
+        hiddenGroups = strList(r.optJSONArray("hide_groups")).toSet()
+        hiddenCh = strList(r.optJSONArray("hide_ch")).toSet()
+        order = strList(r.optJSONArray("order"))
+        val am = HashMap<String, String>()
+        val aa = r.optJSONArray("alias")
+        if (aa != null) for (k in 0 until aa.length()) {
+            val o = aa.getJSONObject(k)
+            am[o.getString("f")] = o.getString("t")
+        }
+        alias = am
+    }
+
+    private fun refreshRules() {
+        reloading = true
+        Thread {
+            var j: JSONObject? = null
+            try {
+                val r = get(initUrl())
+                if (r.first == 200) j = JSONObject(r.second)
+            } catch (e: Exception) {
+            }
+            val res = j
+            ui {
+                reloading = false
+                if (res != null) {
+                    val oldMerge = mergeMode
+                    applySettings(res)
+                    applyRules(res)
+                    if (oldMerge != mergeMode) load() else compose(false)
+                }
+            }
+        }.start()
     }
 
     private fun setupPlaylists(j: JSONObject) {
@@ -461,6 +534,7 @@ class MainActivity : Activity() {
         cache.clear()
         loadedIdx = -1
         if (l.isEmpty()) { setStatus("Nema playlisti.\nDodaj ih u panelu."); return }
+        if (mergeMode) { plSpinner.visibility = View.GONE; loadMerged(); return }
         plIdx = prefs.getInt("pl", 0).coerceIn(0, l.size - 1)
         plSpinner.visibility = if (l.size > 1) View.VISIBLE else View.GONE
         plSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, l.map { it.name })
@@ -468,24 +542,81 @@ class MainActivity : Activity() {
         loadPlaylist(plIdx)
     }
 
+    private fun loadMerged() {
+        loadedIdx = -2
+        setStatus("Učitavanje lista…")
+        val lists = plists
+        Thread {
+            val raws = ArrayList<List<Channel>>()
+            var epg = ""
+            var err = ""
+            for (i in lists.indices) {
+                try {
+                    val p = cache[i] ?: M3U.parse(http(lists[i].url)).also { cache[i] = it }
+                    raws.add(p.channels)
+                    if (epg.isEmpty()) epg = p.epg
+                } catch (e: Exception) {
+                    err = e.message ?: "greška"
+                }
+            }
+            ui {
+                if (raws.isEmpty()) {
+                    loadedIdx = -1; errorState = true
+                    setStatus("Greška: " + err + "\nDodirni za ponovni pokušaj")
+                } else {
+                    rawLists = raws; epgFromList = epg; compose(true)
+                }
+            }
+        }.start()
+    }
+
     private fun loadPlaylist(i: Int) {
         loadedIdx = i
         val cached = cache[i]
-        if (cached != null) { onChannels(cached); return }
+        if (cached != null) { rawLists = listOf(cached.channels); epgFromList = cached.epg; compose(true); return }
         setStatus("Učitavanje liste…")
         Thread {
             try {
                 val p = M3U.parse(http(plists[i].url))
-                ui { cache[i] = p; onChannels(p) }
+                ui { cache[i] = p; rawLists = listOf(p.channels); epgFromList = p.epg; compose(true) }
             } catch (e: Exception) {
                 ui { loadedIdx = -1; errorState = true; setStatus("Greška: " + e.message + "\nDodirni za ponovni pokušaj") }
             }
         }.start()
     }
 
-    private fun onChannels(p: Parsed) {
-        all = p.channels.mapIndexed { i, c -> c.copy(no = i + 1) }
-        if (all.isEmpty()) { shown = listOf(); adapter.notifyDataSetChanged(); setStatus("Playlista je prazna."); return }
+    /** Pravila iz panela: sakrij grupe/kanale, preimenuj grupe, spoji duplikate, poredaj grupe. */
+    private fun build(): List<Channel> {
+        val l = ArrayList<Channel>()
+        for (pl in rawLists) for (c in pl) {
+            if (!hiddenGroups.contains(c.group) && !hiddenCh.contains(c.name)) l.add(c)
+        }
+        var res: List<Channel> = if (mergeMode) Merge.dedupe(l) else l
+        res = res.map { c ->
+            val a = alias[c.group]
+            if (a != null && a.isNotEmpty()) c.copy(group = a) else c
+        }
+        val names = LinkedHashSet<String>()
+        for (c in res) names.add(c.group)
+        val ord = ArrayList<String>()
+        for (g in order) {
+            val a = alias[g] ?: g
+            if (names.contains(a) && !ord.contains(a)) ord.add(a)
+        }
+        for (g in names) if (!ord.contains(g)) ord.add(g)
+        val idx = HashMap<String, Int>()
+        ord.forEachIndexed { i, g -> idx[g] = i }
+        res = res.sortedBy { idx[it.group] ?: 0 }
+        return res.mapIndexed { i, c -> c.copy(no = i + 1) }
+    }
+
+    private fun compose(autoPlay: Boolean) {
+        val curUrl = all.getOrNull(current)?.url
+        all = build()
+        if (all.isEmpty()) {
+            shown = listOf(); adapter.notifyDataSetChanged(); current = -1
+            setStatus("Nema kanala za prikaz."); return
+        }
         groups = all.map { it.group }.distinct()
         val items = ArrayList<String>()
         items.add("Sve grupe")
@@ -493,15 +624,59 @@ class MainActivity : Activity() {
         for (g in groups) items.add(if (groupLocked(g)) "🔒 $g" else g)
         groupSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
         applyFilter()
-        setStatus(null)
-        loadEpg(p)
-        val last = prefs.getString("last", null)
-        val idx = all.indexOfFirst { it.url == last }
-        play(if (idx >= 0) idx else 0, 1)
+        loadEpg(epgFromList)
+        uploadCatalog()
+        if (autoPlay) {
+            setStatus(null)
+            val last = prefs.getString("last", null)
+            val idx = all.indexOfFirst { it.url == last }
+            play(if (idx >= 0) idx else 0, 1)
+        } else {
+            if (!blocked) setStatus(null)
+            current = all.indexOfFirst { it.url == curUrl }
+            updateFavBtn()
+            if (current < 0) play(0, 1)
+        }
     }
 
-    private fun loadEpg(p: Parsed) {
-        val url = if (epgUrl.isNotEmpty()) epgUrl else p.epg
+    private fun uploadCatalog() {
+        val src = rawLists.flatten()
+        if (src.isEmpty()) return
+        val sb = StringBuilder()
+        for (c in src) sb.append(c.group).append('\u0001').append(c.name).append('\n')
+        val hash = sb.toString().hashCode().toString()
+        if (hash == serverCat) return
+        Thread {
+            try {
+                val arr = JSONArray()
+                for (c in src) {
+                    val e = JSONArray()
+                    e.put(c.group)
+                    e.put(c.name)
+                    arr.put(e)
+                }
+                val url = Config.SERVER_URL + "api.php?a=catalog&device=" + enc(deviceId()) + "&hash=" + hash
+                if (post(url, arr.toString()) == 200) serverCat = hash
+            } catch (e: Throwable) {
+            }
+        }.start()
+    }
+
+    private fun post(u: String, body: String): Int {
+        val c = URL(u).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"
+        c.doOutput = true
+        c.connectTimeout = 10000
+        c.readTimeout = 30000
+        c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = c.responseCode
+        c.disconnect()
+        return code
+    }
+
+    private fun loadEpg(epg: String) {
+        val url = if (epgUrl.isNotEmpty()) epgUrl else epg
         if (url.isEmpty()) return
         val ids = HashSet<String>()
         for (c in all) if (c.tvgId.isNotEmpty()) ids.add(c.tvgId)
@@ -577,6 +752,7 @@ class MainActivity : Activity() {
         h.removeCallbacks(retry)
         current = idx
         triedHls = false
+        srcIdx = 0
         val c = all[idx]
         startUrl(c.url, false)
         prefs.edit().putString("last", c.url).apply()
