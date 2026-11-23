@@ -33,7 +33,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import coil.load
 import org.json.JSONArray
@@ -97,6 +100,7 @@ class MainActivity : Activity() {
     private var order = listOf<String>()
     private var alias = mapOf<String, String>()
     private var srcIdx = 0
+    private var userAgent = ""
 
     private val h = Handler(Looper.getMainLooper())
     private val tf = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -127,7 +131,12 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         favs = HashSet<String>(prefs.getStringSet("fav", HashSet<String>()) ?: HashSet<String>())
         buildUi()
-        player = ExoPlayer.Builder(this).build()
+        val dsf = DataSource.Factory {
+            val f = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+            if (userAgent.isNotEmpty()) f.setUserAgent(userAgent)
+            f.createDataSource()
+        }
+        player = ExoPlayer.Builder(this).setMediaSourceFactory(DefaultMediaSourceFactory(dsf)).build()
         playerView.player = player
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
@@ -392,7 +401,7 @@ class MainActivity : Activity() {
             c.connectTimeout = 10000
             c.readTimeout = 30000
             c.instanceFollowRedirects = false
-            c.setRequestProperty("User-Agent", "MojTV/2.0")
+            c.setRequestProperty("User-Agent", if (userAgent.isEmpty()) "MojTV/2.0" else userAgent)
             val code = c.responseCode
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                 val loc = c.getHeaderField("Location") ?: break
@@ -450,6 +459,7 @@ class MainActivity : Activity() {
 
     private fun applySettings(j: JSONObject) {
         pin = j.optString("pin")
+        userAgent = j.optString("ua")
         epgUrl = j.optString("epg")
         val arr = j.optJSONArray("locked")
         val l = ArrayList<String>()
@@ -570,7 +580,7 @@ class MainActivity : Activity() {
             var err = ""
             for (i in lists.indices) {
                 try {
-                    val p = cache[i] ?: M3U.parse(http(lists[i].url)).also { cache[i] = it }
+                    val p = cache[i] ?: fetchList(lists[i].url).also { cache[i] = it }
                     raws.add(p.channels)
                     if (epg.isEmpty()) epg = p.epg
                 } catch (e: Exception) {
@@ -589,17 +599,34 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun loadPlaylist(i: Int) {
+    private fun fetchList(u: String): Parsed {
+        val body = http(u)
+        val p = M3U.parse(body)
+        if (p.channels.isEmpty()) throw IOException("prazan odgovor: " + body.take(60).replace('\n', ' '))
+        return p
+    }
+
+    private fun loadPlaylist(i: Int, tried: Int = 0) {
         loadedIdx = i
         val cached = cache[i]
         if (cached != null) { rawLists = listOf(cached.channels); epgFromList = cached.epg; compose(true); return }
         setStatus("Učitavanje liste…")
         Thread {
             try {
-                val p = M3U.parse(http(plists[i].url))
+                val p = fetchList(plists[i].url)
                 ui { cache[i] = p; rawLists = listOf(p.channels); epgFromList = p.epg; compose(true) }
             } catch (e: Exception) {
-                ui { loadedIdx = -1; errorState = true; setStatus("Greška: " + errText(e) + "\nDodirni za ponovni pokušaj") }
+                ui {
+                    if (tried + 1 < plists.size) {
+                        val nx = (i + 1) % plists.size
+                        flash("Lista " + plists[i].name + " ne radi:\n" + errText(e) + "\nProbavam: " + plists[nx].name, 6000)
+                        loadPlaylist(nx, tried + 1)
+                        plSpinner.setSelection(nx)
+                    } else {
+                        loadedIdx = -1; errorState = true
+                        setStatus("Greška: " + errText(e) + "\nDodirni za ponovni pokušaj")
+                    }
+                }
             }
         }.start()
     }
