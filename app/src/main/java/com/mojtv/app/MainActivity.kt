@@ -99,6 +99,7 @@ class MainActivity : Activity() {
     private var hiddenCh = setOf<String>()
     private var order = listOf<String>()
     private var alias = mapOf<String, String>()
+    private var moveMap = mapOf<String, String>()
     private var srcIdx = 0
     private var userAgent = ""
 
@@ -527,6 +528,13 @@ class MainActivity : Activity() {
             am[o.getString("f")] = o.getString("t")
         }
         alias = am
+        val mvs = r.optJSONArray("move")
+        val mm = HashMap<String, String>()
+        if (mvs != null) for (k in 0 until mvs.length()) {
+            val o = mvs.getJSONObject(k)
+            mm[o.getString("n")] = o.getString("g")
+        }
+        moveMap = mm
     }
 
     private fun refreshRules() {
@@ -635,19 +643,34 @@ class MainActivity : Activity() {
     private fun build(): List<Channel> {
         val l = ArrayList<Channel>()
         for (pl in rawLists) for (c in pl) {
-            if (!hiddenGroups.contains(c.group) && !hiddenCh.contains(c.name)) l.add(c)
+            val mv = moveMap[c.name]
+            if (mv != null) {
+                if (!hiddenCh.contains(c.name) && !hiddenGroups.contains(mv)) l.add(c.copy(group = mv))
+            } else if (!hiddenGroups.contains(c.group) && !hiddenCh.contains(c.name)) {
+                l.add(c)
+            }
         }
         var res: List<Channel> = if (mergeMode) Merge.dedupe(l) else l
         res = res.map { c ->
-            val a = alias[c.group]
-            if (a != null && a.isNotEmpty()) c.copy(group = a) else c
+            if (moveMap.containsKey(c.name)) c
+            else {
+                val a = alias[c.group]
+                if (a != null && a.isNotEmpty()) c.copy(group = a) else c
+            }
+        }
+        // "HR", "hr " i "Hr" postaju jedna grupa
+        val canon = HashMap<String, String>()
+        res = res.map { c ->
+            val g = canon.getOrPut(c.group.trim().lowercase()) { c.group.trim() }
+            if (g != c.group) c.copy(group = g) else c
         }
         val names = LinkedHashSet<String>()
         for (c in res) names.add(c.group)
         val ord = ArrayList<String>()
         for (g in order) {
-            val a = alias[g] ?: g
-            if (names.contains(a) && !ord.contains(a)) ord.add(a)
+            val a = (alias[g] ?: g).trim().lowercase()
+            val n = names.firstOrNull { it.lowercase() == a }
+            if (n != null && !ord.contains(n)) ord.add(n)
         }
         for (g in names) if (!ord.contains(g)) ord.add(g)
         val idx = HashMap<String, Int>()
