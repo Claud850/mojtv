@@ -155,7 +155,7 @@ class MainActivity : Activity() {
                     startUrl(urls[srcIdx], false)
                     return
                 }
-                setStatus("Nema signala – ponovni pokušaj…")
+                setStatus("Nema signala (" + e.errorCodeName + ")\n" + hostOf(url) + "\nPonovni pokušaj…")
                 h.removeCallbacks(retry); h.postDelayed(retry, 6000)
             }
         })
@@ -347,10 +347,10 @@ class MainActivity : Activity() {
         h.removeCallbacks(hideOsd); h.postDelayed(hideOsd, 5000)
     }
 
-    private fun flash(msg: String) {
+    private fun flash(msg: String, ms: Long = 2500) {
         osdLogo.visibility = View.GONE
         osd.text = msg; osd.visibility = View.VISIBLE; osdBox.visibility = View.VISIBLE
-        h.removeCallbacks(hideOsd); h.postDelayed(hideOsd, 2500)
+        h.removeCallbacks(hideOsd); h.postDelayed(hideOsd, ms)
     }
 
     private fun keepControls() { h.removeCallbacks(hideControls); h.postDelayed(hideControls, 6000) }
@@ -409,8 +409,26 @@ class MainActivity : Activity() {
 
     private fun http(u: String): String {
         val r = get(u)
-        if (r.first !in 200..299) throw IOException("HTTP " + r.first)
+        if (r.first !in 200..299) throw IOException("HTTP " + r.first + " – " + shortUrl(u))
         return r.second
+    }
+
+    private fun shortUrl(u: String): String {
+        return try {
+            val x = URL(u)
+            val s = x.host + (if (x.port > 0) ":" + x.port else "") + x.path
+            if (s.length > 70) s.substring(0, 70) + "…" else s
+        } catch (e: Exception) {
+            u.take(70)
+        }
+    }
+
+    private fun hostOf(u: String): String = try { URL(u).host } catch (e: Exception) { "?" }
+
+    private fun errText(e: Throwable): String {
+        val m = e.message
+        return if (e is IOException && m != null && m.startsWith("HTTP")) m
+        else e.javaClass.simpleName + (if (m != null) ": " + m else "")
     }
 
     private fun deviceId(): String =
@@ -449,11 +467,11 @@ class MainActivity : Activity() {
                     ui { blocked = true; player.stop(); showBlocked(r.second) }
                     return@Thread
                 }
-                if (r.first != 200) throw IOException("HTTP " + r.first)
+                if (r.first != 200) throw IOException("HTTP " + r.first + " – server: " + shortUrl(Config.SERVER_URL + "api.php"))
                 val j = JSONObject(r.second)
                 ui { blocked = false; applySettings(j); applyRules(j); setupPlaylists(j) }
             } catch (e: Exception) {
-                ui { errorState = true; setStatus("Greška: " + e.message + "\nDodirni za ponovni pokušaj") }
+                ui { errorState = true; setStatus("Greška (server): " + errText(e) + "\nDodirni za ponovni pokušaj") }
             }
         }.start()
     }
@@ -556,7 +574,7 @@ class MainActivity : Activity() {
                     raws.add(p.channels)
                     if (epg.isEmpty()) epg = p.epg
                 } catch (e: Exception) {
-                    err = e.message ?: "greška"
+                    err += (if (err.isEmpty()) "" else "\n") + lists[i].name + ": " + errText(e)
                 }
             }
             ui {
@@ -565,6 +583,7 @@ class MainActivity : Activity() {
                     setStatus("Greška: " + err + "\nDodirni za ponovni pokušaj")
                 } else {
                     rawLists = raws; epgFromList = epg; compose(true)
+                    if (err.isNotEmpty()) flash("Nisu učitane liste:\n" + err, 10000)
                 }
             }
         }.start()
@@ -580,7 +599,7 @@ class MainActivity : Activity() {
                 val p = M3U.parse(http(plists[i].url))
                 ui { cache[i] = p; rawLists = listOf(p.channels); epgFromList = p.epg; compose(true) }
             } catch (e: Exception) {
-                ui { loadedIdx = -1; errorState = true; setStatus("Greška: " + e.message + "\nDodirni za ponovni pokušaj") }
+                ui { loadedIdx = -1; errorState = true; setStatus("Greška: " + errText(e) + "\nDodirni za ponovni pokušaj") }
             }
         }.start()
     }
